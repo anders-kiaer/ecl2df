@@ -22,6 +22,8 @@ import datetime
 import argparse
 import logging
 
+import pdb
+
 import numpy as np
 import pandas as pd
 
@@ -128,7 +130,6 @@ def df(eclfiles):
             wellmodel == "MULTISEG"
             and not headers[headers["recordname"].str.startswith("SEG")].empty
         ):
-            logger.debug("Well %s is MULTISEG but has no SEG data", well)
             numberofrows = int(
                 headers[headers["recordname"] == "SEGDEPTH"]["recordlength"]
             )
@@ -143,6 +144,7 @@ def df(eclfiles):
                 seg_data[recordname] = list(rftfile[rftidx])
 
             seg_data["SEGIDX"] = seg_data.index + 1  # Add an index that starts with 1
+            # pdb.set_trace()
 
             # Determine well topology: The way ICDs are modelled
             # complexifies this, as each ICD device must be put on a
@@ -153,12 +155,15 @@ def df(eclfiles):
             # Leaf segments are those segments with no upstream
             # segment Merge SEGIDX and SEGNXT, leaf segments now have
             # NaN for SEGIDX_y after the merge:
+            topology = seg_data[["SEGIDX", "SEGNXT"]] #if well == "DOP01":
+            #    print(topology.to_csv(sep="\t"))
             merged_seg_data = pd.merge(
                 seg_data, seg_data, how="outer", left_on="SEGIDX", right_on="SEGNXT"
             )
             # We may compute leafsegments like this:
             # leafsegments = merged_seg_ata[merged_seg_data["SEGIDX_y"] == numpy.nan]
-
+            #if well == "DOP01":
+            #    pdb.set_trace()
             # After having removed leaf segments, we can claim that
             # the maximum value of SEGBRNO determines the number of
             # well branches. This will fail if ICD segments are
@@ -166,11 +171,13 @@ def df(eclfiles):
             # on your own (it will probably just be recognized as an
             # extra branch)
 
-            numberofbranches = int(
-                merged_seg_data[~merged_seg_data["SEGIDX_y"].isnull()][
-                    "SEGBRNO_x"
-                ].max()
+            leaf_segments = merged_seg_data["SEGIDX_y"].isnull()
+            numberofbranches = len(
+                merged_seg_data[~leaf_segments]["SEGBRNO_x"].dropna().unique()
             )
+            logger.debug("Branches for %s: %d", well, numberofbranches)
+            # NB: The enumeration branches is not necessarily consecutive
+            # from SEGBRNO.
 
             # After-note:
             # An equivalent implementation could be to do such
@@ -178,13 +185,23 @@ def df(eclfiles):
 
             # Now we can test if we have any ICD segments, that is the
             # case if we have any segments that have SEGBRNO higher than
-            # the branch count
+            # the branch count.
+
             icd_present = seg_data["SEGBRNO"].max() > numberofbranches
 
             if icd_present:
-                icd_seg_data = seg_data[seg_data["SEGBRNO"] > numberofbranches]
+                logger.debug("ICD's detected in %s", well)
+
+                # Which segments are ICD segments? Maybe we should gather them
+                # as the segments pointed to by leaf segments:
+                icd_seg_indices = merged_seg_data[leaf_segments]["SEGNXT_x"].values
+                non_icd_indices = set(seg_data.index) - set(icd_seg_indices)
+                icd_seg_data = seg_data.reindex(icd_seg_indices)
+                logger.debug("Found %d ICD segments", len(icd_seg_indices))
+                # icd_seg_data = seg_data[seg_data["SEGBRNO"] > numberofbranches]
                 # Chop away the icd's from the seg_data dataframe:
-                seg_data = seg_data[seg_data["SEGBRNO"] <= numberofbranches]
+                seg_data = seg_data.reindex(non_icd_indices)
+                #seg_data = seg_data[seg_data["SEGBRNO"] not in icd_seg_indices]
 
                 # Rename columns in icd dataset:
                 icd_seg_data.columns = ["ICD_" + x for x in icd_seg_data.columns]
@@ -202,14 +219,26 @@ def df(eclfiles):
                 # unknown effects when simulated in Eclipse Should we
                 # warn the user??
 
+                # We need this at least for some JC test files
+                #if "ICD_SEGBRNO" not in icd_seg_data and "ICD_SEGBRNO_x" in icd_seg_data:
+                #    icd_seg_data["ICD_SEGBRNO"] = icd_seg_data["ICD_SEGBRNO_x"]
+                #if "ICD_SEGNXT" not in icd_seg_data and "ICD_SEGNXT_x" in icd_seg_data:
+                #    icd_seg_data["ICD_SEGNXT"] = icd_seg_data["ICD_SEGNXT_x"]
+
+                #if well == "DOP01":
+                #pdb.set_trace()
                 con_icd_data = pd.merge(
-                    con_data, icd_seg_data, right_on="ICD_SEGBRNO", left_on="CONBRNO"
+                    con_data, icd_seg_data, left_on="CONSEGNO", right_on="ICD_SEGBRNO",
                 )
+                #pdb.set_trace()
 
                 # Merge SEGxxxxx to icd_conf_data
                 conseg_data = pd.merge(
                     con_icd_data, seg_data, left_on="ICD_SEGNXT", right_on="SEGIDX"
                 )
+                #pdb.set_trace()
+                if well == "DOP01":
+                    pdb.set_trace()
 
                 # Add more data:
                 conseg_data["CompletionDP"] = 0
@@ -220,9 +249,11 @@ def df(eclfiles):
                     conseg_data[nonzero_pres]["CONPRES"]
                     - conseg_data[nonzero_pres]["SEGPRES"]
                 )
+                if well == "DOP01":
+                    pdb.set_trace()
 
             if not icd_present:
-
+                logger.debug("No ICD in %s", well)
                 # Merge SEGxxxxx to CONxxxxx data if we can find data that match them
                 if "CONSEGNO" in con_data and "SEGIDX" in seg_data:
                     conseg_data = pd.merge(
@@ -235,6 +266,9 @@ def df(eclfiles):
             # Overwrite the con_data structure with the augmented data
             # structure including segments and potential ICD.
             con_data = conseg_data
+        else:
+            logger.debug("Well %s is MULTISEG but has no SEG data", well)
+
         con_data["DRAWDOWN"] = 0  # Set a default so that the column always exists
         if (
             "CONPRES" in con_data.columns
@@ -306,6 +340,7 @@ def fill_parser(parser):
         "-o", "--output", type=str, help="Name of output CSV file.", default="rft.csv"
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Be verbose")
+    parser.add_argument("--debug", action="store_true", help="Debug mode")
     return parser
 
 
@@ -323,6 +358,8 @@ def rft_main(args):
     """Entry-point for module, for command line utility"""
     if args.verbose:
         logger.setLevel(logging.INFO)
+    if args.debug:
+        logger.setLevel(logging.DEBUG)
     if args.DATAFILE.endswith(".RFT"):
         # Support the RFT file as an argument also:
         eclfiles = EclFiles(args.DATAFILE.replace(".RFT", "") + ".DATA")
